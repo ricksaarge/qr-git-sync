@@ -572,7 +572,11 @@ def cmd_receive(args):
     print("Point camera at sender's screen.  q/ESC to quit.")
     print()
 
-    detector = cv2.QRCodeDetector()
+    # Use ArUco-based detector if available (much more reliable), fall back to standard
+    if hasattr(cv2, "QRCodeDetectorAruco"):
+        detector = cv2.QRCodeDetectorAruco()
+    else:
+        detector = cv2.QRCodeDetector()
 
     # Transfer state — restore from partial if available
     if partial:
@@ -626,7 +630,7 @@ def cmd_receive(args):
         pts = None
         try:
             data, pts, _ = detector.detectAndDecode(frame)
-        except cv2.error:
+        except (cv2.error, IndexError, ValueError):
             pass
 
         if data:
@@ -894,7 +898,10 @@ def cmd_selftest(args):
     def qr_round_trip():
         test_data = '{"t":"selftest","v":1,"msg":"hello"}'
         img = render_qr(test_data, size=400)
-        detector = cv2.QRCodeDetector()
+        if hasattr(cv2, "QRCodeDetectorAruco"):
+            detector = cv2.QRCodeDetectorAruco()
+        else:
+            detector = cv2.QRCodeDetector()
         decoded, _, _ = detector.detectAndDecode(img)
         if decoded != test_data:
             raise RuntimeError(f"Decoded '{decoded}' != expected")
