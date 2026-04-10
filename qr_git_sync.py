@@ -447,46 +447,30 @@ def cmd_send(args):
     print("Point the receiver's camera at this screen.")
     print()
 
-    # Pre-render or lazy-render based on chunk count
-    sid = _session_id()
-    use_lazy = n > MAX_PRERENDER_CHUNKS
+    # Lazy rendering — generate QR codes on demand with LRU cache
+    # Session ID derived from content hash so same repo state = same frames
+    sid = sha16[:6]
+    meta_qr = render_qr(pkt_meta(sid, n, len(encoded), sha16, branch))
+    end_qr = render_qr(pkt_end(sid))
+    qr_cache = collections.OrderedDict()
+    total = n + 2
 
-    if use_lazy:
-        print(f"Lazy rendering mode ({n} chunks too large to prerender).")
-        meta_qr = render_qr(pkt_meta(sid, n, len(encoded), sha16, branch))
-        end_qr = render_qr(pkt_end(sid))
-        # LRU cache to bound memory in lazy mode
-        qr_cache = collections.OrderedDict()
-        total = n + 2
-
-        def get_frame(frame_idx):
-            if frame_idx == 0:
-                return "META", meta_qr
-            elif frame_idx == total - 1:
-                return "END", end_qr
-            else:
-                ci = frame_idx - 1
-                if ci in qr_cache:
-                    qr_cache.move_to_end(ci)
-                    return f"{ci+1}/{n}", qr_cache[ci]
-                seg, crc = chunks[ci]
-                img = render_qr(pkt_data(sid, ci, n, seg, crc))
-                qr_cache[ci] = img
-                if len(qr_cache) > LAZY_CACHE_SIZE:
-                    qr_cache.popitem(last=False)
-                return f"{ci+1}/{n}", img
-    else:
-        print("Rendering QR codes...", end=" ", flush=True)
-        frames = []
-        frames.append(("META", render_qr(pkt_meta(sid, n, len(encoded), sha16, branch))))
-        for i, (seg, crc) in enumerate(chunks):
-            frames.append((f"{i+1}/{n}", render_qr(pkt_data(sid, i, n, seg, crc))))
-        frames.append(("END", render_qr(pkt_end(sid))))
-        total = len(frames)
-        print(f"{total} frames ready.")
-
-        def get_frame(frame_idx):
-            return frames[frame_idx]
+    def get_frame(frame_idx):
+        if frame_idx == 0:
+            return "META", meta_qr
+        elif frame_idx == total - 1:
+            return "END", end_qr
+        else:
+            ci = frame_idx - 1
+            if ci in qr_cache:
+                qr_cache.move_to_end(ci)
+                return f"{ci+1}/{n}", qr_cache[ci]
+            seg, crc = chunks[ci]
+            img = render_qr(pkt_data(sid, ci, n, seg, crc))
+            qr_cache[ci] = img
+            if len(qr_cache) > LAZY_CACHE_SIZE:
+                qr_cache.popitem(last=False)
+            return f"{ci+1}/{n}", img
 
     # Display carousel
     win = "QR Git Sync  [SEND]"
@@ -720,15 +704,43 @@ def cmd_receive(args):
             bar_x, bar_y = int(fw * 0.1), fh - 50
             bar_w = int(fw * 0.8)
 
+            bar_h = 24
+            # Draw dark background for entire bar
             cv2.rectangle(frame, (bar_x, bar_y),
-                          (bar_x + bar_w, bar_y + 24), (40, 40, 40), -1)
-            cv2.rectangle(frame, (bar_x, bar_y),
-                          (bar_x + int(bar_w * pct), bar_y + 24),
-                          (0, 220, 0), -1)
+                          (bar_x + bar_w, bar_y + bar_h), (40, 40, 40), -1)
+            # Draw individual chunk slots — green if received, stays dark if missing
+            if n_chunks > 0:
+                slot_w = bar_w / n_chunks
+                for ci in range(n_chunks):
+                    if ci in received:
+                        sx = bar_x + int(ci * slot_w)
+                        ex = bar_x + int((ci + 1) * slot_w)
+                        cv2.rectangle(frame, (sx, bar_y),
+                                      (ex, bar_y + bar_h), (0, 220, 0), -1)
+                # Draw thin separator lines when chunks are wide enough
+                if slot_w >= 3:
+                    for ci in range(1, n_chunks):
+                        lx = bar_x + int(ci * slot_w)
+                        cv2.line(frame, (lx, bar_y), (lx, bar_y + bar_h),
+                                 (30, 30, 30), 1)
             cv2.putText(frame,
                         f"{done}/{n_chunks}  ({int(pct*100)}%)",
                         (bar_x, bar_y - 8), cv2.FONT_HERSHEY_SIMPLEX,
                         0.65, (0, 255, 0), 2, cv2.LINE_AA)
+            # Show first 10 missing chunk numbers
+            missing_ids = [i for i in range(n_chunks) if i not in received]
+            if missing_ids:
+                shown = missing_ids[:10]
+                ellipsis = "..." if len(missing_ids) > 10 else ""
+                miss_text = f"Missing: {', '.join(str(x) for x in shown)}{ellipsis}"
+                # Dark background behind text for readability — above the bar
+                (tw, th), _ = cv2.getTextSize(miss_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                tx, ty = bar_x, bar_y - 35
+                cv2.rectangle(frame, (tx - 4, ty - th - 4),
+                              (tx + tw + 4, ty + 6), (0, 0, 0), -1)
+                cv2.putText(frame, miss_text,
+                            (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7, (0, 200, 255), 2, cv2.LINE_AA)
 
             if pts is not None and len(pts) > 0:
                 try:
