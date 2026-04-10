@@ -6,8 +6,8 @@ Sender displays QR codes on screen in a cycling carousel.
 Receiver reads them via webcam, reconstructs the git bundle, and applies it.
 
 Usage:
-    python qr_git_sync.py send [--repo .] [--chunk-size 600] [--full]
-    python qr_git_sync.py receive [--repo .] [--camera 0]
+    python qr_git_sync.py send [--repo .] [--chunk-size 600] [--since HASH]
+    python qr_git_sync.py receive [--repo .] [--camera 1]
     python qr_git_sync.py status [--repo .]
 
 Install:
@@ -19,8 +19,7 @@ Controls (send):
     -         slower cycling
     n         next QR manually
     p         previous QR manually
-    t         tag sync point (marks commits as sent)
-    q / ESC   quit (without tagging)
+    q / ESC   quit
 
 Controls (receive):
     q / ESC   quit (saves partial progress for resume)
@@ -70,7 +69,6 @@ DEFAULT_CHUNK_SIZE = 600        # base64 chars per QR data payload
 DEFAULT_DISPLAY_MS = 500        # ms per QR frame in carousel
 QR_RENDER_SIZE = 580            # px for the QR image itself
 WINDOW_W, WINDOW_H = 800, 720  # display window size
-SYNC_TAG_PREFIX = "qr-sync-"
 EC_LEVEL = qrcode.constants.ERROR_CORRECT_M  # 15% recovery
 MAX_PRERENDER_CHUNKS = 5000     # above this, render on-the-fly
 LAZY_CACHE_SIZE = 200           # LRU cache slots in lazy render mode
@@ -169,22 +167,6 @@ def list_branches(root):
     """Return list of local branch names."""
     r = _git(["branch", "--format=%(refname:short)"], root, check=False)
     return [b.strip() for b in r.stdout.splitlines() if b.strip()]
-
-
-def last_sync_tag(root):
-    r = _git(["tag", "-l", f"{SYNC_TAG_PREFIX}*", "--sort=-creatordate"],
-             root, check=False)
-    tags = [t for t in r.stdout.strip().splitlines() if t]
-    return tags[0] if tags else None
-
-
-def set_sync_tag(root):
-    # Use milliseconds + random suffix to avoid collisions within same second
-    ts = int(time.time() * 1000)
-    suffix = "".join(random.choices(string.ascii_lowercase, k=3))
-    tag = f"{SYNC_TAG_PREFIX}{ts}-{suffix}"
-    _git(["tag", tag], root)
-    return tag
 
 
 def create_bundle(root, since=None):
@@ -310,7 +292,7 @@ def sender_frame(qr_img, label, info, speed_ms, paused, idx, total):
     fill = int(bar_w * (idx + 1) / total) if total else 0
     cv2.rectangle(frame, (20, y), (20 + fill, y + 8), (0, 160, 0), -1)
     y += 22
-    _put_text(frame, "t=tag sync   q=quit without tagging", 20, y, 0.42, (120, 120, 120))
+    _put_text(frame, "SPACE=pause  +/-=speed  n/p=step  q=quit", 20, y, 0.42, (120, 120, 120))
     return frame
 
 
@@ -398,16 +380,12 @@ def cmd_send(args):
     branch = current_branch(root)
     chunk_sz = args.chunk_size
 
-    since = None
-    if not args.full:
-        since = last_sync_tag(root)
-        if since:
-            if not has_changes(root, since):
-                print(f"No new commits since {since}. Nothing to send.")
-                return
-            print(f"Last sync: {since}")
-        else:
-            print("No previous sync tag. Sending full repo.")
+    since = args.since
+    if since:
+        if not has_changes(root, since):
+            print(f"No new commits since {since}. Nothing to send.")
+            return
+        print(f"Sending commits after {since}")
 
     # Build bundle
     print("Creating git bundle...")
@@ -443,7 +421,7 @@ def cmd_send(args):
             return
 
     print()
-    print("Controls: SPACE=pause  +/-=speed  n/p=step  t=tag  q=quit")
+    print("Controls: SPACE=pause  +/-=speed  n/p=step  q=quit")
     print("Point the receiver's camera at this screen.")
     print()
 
@@ -482,7 +460,6 @@ def cmd_send(args):
     paused = False
     speed = args.speed
     last_t = time.time()
-    tagged = False
     info = f"sid={sid}  branch={branch}  bundle={len(bundle):,}B  chunks={n}"
 
     while _window_open(win):
@@ -493,14 +470,6 @@ def cmd_send(args):
         key = cv2.waitKey(20) & 0xFF
         if key in (ord("q"), 27):
             break
-        elif key == ord("t"):
-            if not tagged:
-                tag = set_sync_tag(root)
-                tagged = True
-                print(f"Sync tagged: {tag}")
-                print("  Keep cycling until receiver confirms, then q to quit.")
-            else:
-                print("  Already tagged.")
         elif key == ord(" "):
             paused = not paused
         elif key in (ord("+"), ord("=")):
@@ -521,10 +490,6 @@ def cmd_send(args):
 
     cv2.destroyAllWindows()
 
-    if not tagged:
-        print("Exited without tagging. Next send will include the same commits.")
-        print("  (Run 'status' to check, or use 't' during send to tag.)")
-
 
 # ---------------------------------------------------------------------------
 # RECEIVE
@@ -532,6 +497,13 @@ def cmd_send(args):
 
 def cmd_receive(args):
     root = repo_root(args.repo)
+
+    head = _git(["rev-parse", "--short", "HEAD"], root, check=False)
+    head_hash = head.stdout.strip() if head.returncode == 0 else None
+    if head_hash:
+        print(f"HEAD: {head_hash}")
+        print(f"  Use --since {head_hash} on the sender for incremental transfer.")
+        print()
 
     # Check for resumable partial transfer
     partial = load_partial(root)
@@ -760,6 +732,10 @@ def cmd_receive(args):
             cv2.putText(frame, "Waiting for sender...",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (0, 0, 255), 2, cv2.LINE_AA)
+            if head_hash:
+                cv2.putText(frame, f"HEAD: {head_hash}",
+                            (20, 75), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7, (200, 200, 200), 2, cv2.LINE_AA)
 
         cv2.imshow(win, frame)
 
@@ -807,8 +783,7 @@ def cmd_receive(args):
             print("  Applying...")
             try:
                 apply_bundle(root, bundle)
-                tag = set_sync_tag(root)
-                print(f"  Sync complete. Tagged: {tag}")
+                print("  Sync complete.")
                 clear_partial(root)
             except Exception as e:
                 print(f"  Error: {e}")
@@ -828,25 +803,15 @@ def cmd_receive(args):
 def cmd_status(args):
     root = repo_root(args.repo)
     branch = current_branch(root)
-    tag = last_sync_tag(root)
+    head = _git(["rev-parse", "--short", "HEAD"], root, check=False)
+    head_hash = head.stdout.strip() if head.returncode == 0 else "unknown"
 
     print(f"Repo:   {root}")
     print(f"Branch: {branch}")
-
-    if tag:
-        ts_str = tag.replace(SYNC_TAG_PREFIX, "").split("-")[0]  # strip random suffix
-        try:
-            ts_ms = int(ts_str)
-            ts = ts_ms / 1000 if ts_ms > 9999999999 else ts_ms  # detect ms vs s
-            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-        except ValueError:
-            when = "?"
-        r = _git(["rev-list", "--count", f"{tag}..HEAD"], root, check=False)
-        ahead = r.stdout.strip() if r.returncode == 0 else "?"
-        print(f"Last sync: {tag}  ({when})")
-        print(f"Commits since: {ahead}")
-    else:
-        print("Last sync: never")
+    print(f"HEAD:   {head_hash}")
+    print()
+    print(f"To send only new commits from the other machine:")
+    print(f"  python qr_git_sync.py send --since {head_hash}")
 
     # Check for partial receive
     partial = load_partial(root)
@@ -1039,7 +1004,7 @@ def main():
         epilog="""
 Examples:
   python qr_git_sync.py send                  # send changes from cwd repo
-  python qr_git_sync.py send --full           # send entire repo (ignore sync tags)
+  python qr_git_sync.py send --since abc123   # only commits after abc123
   python qr_git_sync.py send --chunk-size 400 # smaller QR = more reliable on bad cameras
   python qr_git_sync.py receive               # receive into cwd repo
   python qr_git_sync.py receive --camera 1    # use second camera
@@ -1054,8 +1019,8 @@ Examples:
                    help=f"Base64 bytes per QR (default: {DEFAULT_CHUNK_SIZE})")
     s.add_argument("--speed", type=int, default=DEFAULT_DISPLAY_MS,
                    help=f"Ms per QR frame (default: {DEFAULT_DISPLAY_MS})")
-    s.add_argument("--full", action="store_true",
-                   help="Bundle entire repo (ignore sync tags)")
+    s.add_argument("--since", type=str, default=None,
+                   help="Commit hash to send from (only commits after this)")
 
     r = sub.add_parser("receive", help="Read QR codes via webcam")
     r.add_argument("--repo", default=".", help="Git repo path (default: cwd)")
