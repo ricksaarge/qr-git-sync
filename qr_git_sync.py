@@ -66,7 +66,7 @@ except ImportError as e:
 
 PROTOCOL_VERSION = 1
 DEFAULT_CHUNK_SIZE = 600        # base64 chars per QR data payload
-DEFAULT_DISPLAY_MS = 500        # ms per QR frame in carousel
+DEFAULT_DISPLAY_MS = 50         # ms per QR frame in carousel
 QR_RENDER_SIZE = 580            # px for the QR image itself
 WINDOW_W, WINDOW_H = 800, 720  # display window size
 EC_LEVEL = qrcode.constants.ERROR_CORRECT_M  # 15% recovery
